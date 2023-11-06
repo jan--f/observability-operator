@@ -135,6 +135,22 @@ rules:
   - patch
   - update
 - apiGroups:
+  - observability-operator.rhobs
+  resources:
+  - configs
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - observability-operator.rhobs
+  resources:
+  - configs/finalizers
+  - configs/status
+  verbs:
+  - get
+  - update
+- apiGroups:
   - policy
   resources:
   - poddisruptionbudgets
