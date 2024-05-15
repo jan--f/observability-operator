@@ -7,6 +7,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/rhobs/observability-operator/pkg/apis/monitoring/v1alpha1"
+	"github.com/rhobs/observability-operator/pkg/status"
 )
 
 const (
@@ -24,6 +25,36 @@ const (
 	ResourceDiscoveryOnMessage     = "Resource discovery is operational"
 	NoReason                       = "None"
 )
+
+type OBOPrometheusCondition struct {
+	monv1.Condition
+}
+
+func (o OBOPrometheusCondition) GetStackCondition() v1alpha1.Condition {
+	ac := v1alpha1.Condition{
+		Type:               v1alpha1.AvailableCondition,
+		Status:             v1alpha1.ConditionUnknown,
+		Reason:             NoReason,
+		LastTransitionTime: metav1.Now(),
+	}
+	if o.Status != monv1.ConditionTrue {
+		ac.Status = prometheusStatusToMSStatus(o.Status)
+		if o.Status == monv1.ConditionDegraded {
+			ac.Reason = PrometheusDegraded
+		} else {
+			ac.Reason = PrometheusNotAvailable
+		}
+		ac.Message = o.Message
+		ac.LastTransitionTime = metav1.Now()
+		return ac
+	}
+	ac.Status = v1alpha1.ConditionTrue
+	ac.Reason = AvailableReason
+	ac.Message = AvailableMessage
+	// ac.ObservedGeneration = generation
+	ac.LastTransitionTime = metav1.Now()
+	return ac
+}
 
 func updateConditions(ms *v1alpha1.MonitoringStack, prom monv1.Prometheus, recError error) []v1alpha1.Condition {
 	return []v1alpha1.Condition{
@@ -85,8 +116,8 @@ func updateAvailable(conditions []v1alpha1.Condition, prom monv1.Prometheus, gen
 
 	if err != nil {
 		ac.Status = v1alpha1.ConditionUnknown
-		ac.Reason = PrometheusNotAvailable
-		ac.Message = CannotReadPrometheusConditions
+		ac.Reason = status.PrometheusNotAvailable
+		ac.Message = status.CannotReadPrometheusConditions
 		ac.LastTransitionTime = metav1.Now()
 		return ac
 	}
@@ -96,23 +127,7 @@ func updateAvailable(conditions []v1alpha1.Condition, prom monv1.Prometheus, gen
 		return ac
 	}
 
-	if prometheusAvailable.Status != monv1.ConditionTrue {
-		ac.Status = prometheusStatusToMSStatus(prometheusAvailable.Status)
-		if prometheusAvailable.Status == monv1.ConditionDegraded {
-			ac.Reason = PrometheusDegraded
-		} else {
-			ac.Reason = PrometheusNotAvailable
-		}
-		ac.Message = prometheusAvailable.Message
-		ac.LastTransitionTime = metav1.Now()
-		return ac
-	}
-	ac.Status = v1alpha1.ConditionTrue
-	ac.Reason = AvailableReason
-	ac.Message = AvailableMessage
-	ac.ObservedGeneration = generation
-	ac.LastTransitionTime = metav1.Now()
-	return ac
+	return status.UpdateAvailable[OBOPrometheusCondition]([]OBOPrometheusCondition{*prometheusAvailable})
 }
 
 // updateReconciled updates "Reconciled" conditions based on the provided error value and
@@ -163,10 +178,10 @@ func updateReconciled(conditions []v1alpha1.Condition, prom monv1.Prometheus, ge
 	return rc
 }
 
-func getPrometheusCondition(prometheusConditions []monv1.Condition, t monv1.ConditionType) (*monv1.Condition, error) {
+func getPrometheusCondition(prometheusConditions []monv1.Condition, t monv1.ConditionType) (*OBOPrometheusCondition, error) {
 	for _, c := range prometheusConditions {
 		if c.Type == t {
-			return &c, nil
+			return &OBOPrometheusCondition{c}, nil
 		}
 	}
 	return nil, fmt.Errorf("cannot find condition %v", t)
