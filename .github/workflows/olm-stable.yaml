@@ -30,7 +30,6 @@ jobs:
         with:
           ref: ${{ steps.branch.outputs.name }}
           fetch-depth: 0
-          token: ${{ secrets.REPOSITORY_PUSH_TOKEN || github.token }}
 
       - name: Setup Go environment
         uses: actions/setup-go@v6
@@ -50,8 +49,6 @@ jobs:
           quay_token: ${{ secrets.QUAY_TOKEN }}
 
       - name: Open catalog PR
-        env:
-          GH_TOKEN: ${{ secrets.REPOSITORY_PUSH_TOKEN || github.token }}
         run: |
           git config user.name rhobs-release-bot
           git config user.email release-bot@monitoring.rhobs.io
