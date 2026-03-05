@@ -1,0 +1,140 @@
+# Handles RC releases cut from release-* branches.
+# Triggered by a chore(release): commit pushed to any release-* branch.
+# Creates a GitHub pre-release, publishes OLM candidate images, and opens a PR
+# against the release branch with the updated catalog index.
+name: Release Branch
+on:
+  push:
+    branches: ['release-*']
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  e2e-tests-olm:
+    if: "startsWith(github.event.head_commit.message, 'chore(release):')"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: e2e tests through OLM
+        uses: ./.github/e2e-tests-olm
+
+  create-github-prerelease:
+    needs:
+      - e2e-tests-olm
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.REPOSITORY_PUSH_TOKEN }}
+          persist-credentials: false
+
+      # standard-version's release-as relies on controller-gen for code generation.
+      - name: Setup Go environment
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: 'go.mod'
+          check-latest: true
+
+      - name: Generate release notes
+        run: |
+          git config user.name rhobs-release-bot
+          git config user.email release-bot@monitoring.rhobs.io
+          npx standard-version -i RELEASE_BODY.md \
+            --release-as $(cat VERSION) \
+            --skip.commit
+
+      - name: Publish tag
+        id: publish_tag
+        run: |
+          git push --follow-tags
+          echo "tag_name=$(git describe HEAD --abbrev=0)" >> $GITHUB_OUTPUT
+
+      - name: Create Github release
+        uses: ncipollo/release-action@v1
+        with:
+          tag: ${{ steps.publish_tag.outputs.tag_name }}
+          bodyFile: RELEASE_BODY.md
+          # NOTE: We always generate pre-releases and mark them as releases manually
+          prerelease: true
+
+  publish-olm-candidate:
+    needs:
+      - create-github-prerelease
+    runs-on: ubuntu-latest
+    environment: quay
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.REPOSITORY_PUSH_TOKEN }}
+
+      - name: Setup Go environment
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: 'go.mod'
+          check-latest: true
+
+      - name: Set version
+        id: version
+        run: |
+          version="$(cat VERSION)-rc"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Publish catalog
+        uses: ./.github/olm-publish
+        env:
+          IMG_BASE: ${{ vars.IMG_BASE }}
+          VERSION: ${{ steps.version.outputs.version }}
+          CHANNELS: candidate,development
+          DEFAULT_CHANNEL: candidate
+          RELEASE_SHA: ${GITHUB_SHA}
+        with:
+          quay_login: ${{ secrets.QUAY_LOGIN }}
+          quay_token: ${{ secrets.QUAY_TOKEN }}
+
+      - name: Open catalog PR
+        env:
+          GH_TOKEN: ${{ secrets.REPOSITORY_PUSH_TOKEN }}
+        run: |
+          git config user.name rhobs-release-bot
+          git config user.email release-bot@monitoring.rhobs.io
+
+          TARGET_BRANCH="${{ github.ref_name }}"
+          PR_BRANCH="ci/olm-catalog-candidate-${TARGET_BRANCH}"
+          git checkout -b "$PR_BRANCH"
+          git add bundle/ olm/index-template.yaml
+          git commit -m "ci(bot): update OLM candidate catalog to ${{ steps.version.outputs.version }}"
+          git push --force origin "$PR_BRANCH"
+
+          existing=$(gh pr list --head "$PR_BRANCH" --base "$TARGET_BRANCH" --json number --jq '.[0].number')
+          if [ -z "$existing" ]; then
+            gh pr create \
+              --base "$TARGET_BRANCH" \
+              --head "$PR_BRANCH" \
+              --title "ci: update OLM candidate catalog (${{ steps.version.outputs.version }})" \
+              --body "Automated catalog update for the candidate channel."
+          fi
+
+      - name: Publish Package
+        uses: ./.github/package-operator-publish
+        env:
+          IMG_BASE: ${{ vars.IMG_BASE }}
+          VERSION: ${{ steps.version.outputs.version }}
+        with:
+          quay_login: ${{ secrets.QUAY_LOGIN }}
+          quay_token: ${{ secrets.QUAY_TOKEN }}
+
+      - name: Publish test harness
+        uses: ./.github/osd-test-harness-publish
+        env:
+          IMG_BASE: ${{ vars.IMG_BASE }}
+          VERSION: ${{ steps.version.outputs.version }}
+        with:
+          quay_login: ${{ secrets.QUAY_LOGIN }}
+          quay_token: ${{ secrets.QUAY_TOKEN }}
