@@ -1,5 +1,5 @@
 name: 'Publish to OLM'
-description: 'Publishes the operator to OLM'
+description: 'Publishes the operator to OLM. Expects olm/index-template.yaml to exist in the working tree.'
 inputs:
   quay_login:
     description: "Quay login"
@@ -15,6 +15,7 @@ runs:
     shell: bash
     run: |
       go version
+
   - name: Setup Go environment
     uses: actions/setup-go@v5
     if: steps.go-version.outcome == 'failure'
@@ -32,34 +33,6 @@ runs:
       username: ${{ inputs.quay_login }}
       password: ${{ inputs.quay_token }}
 
-  - name: Create new integration branch
-    shell: bash
-    # Creating a branch here in order to avoid commiting to our local main
-    # branch further down in this action. In some make targets we use main's sha
-    # and by creating a branch here we can just assume local main is the same as
-    # remote main.
-    run: |
-      # Discard any uncommitted changes from previous steps (e.g., standard-version)
-      git reset --hard HEAD
-      git clean -fd
-      git checkout -b olm-publish-action-scratch
-
-  - name: Fetch olm-catalog branch
-    shell: bash
-    run: git fetch origin olm-catalog
-
-  - name: Git merge olm-catalog branch
-    shell: bash
-    run: |
-      git config user.name rhobs-release-bot
-      git config user.email release-bot@monitoring.rhobs.io
-
-      # NOTE: uses strategy-option=ours as bundle created for a release using
-      # make initiate-release conflicts with the previous bundle created for
-      # development branch, so the version in main takes precedence over the
-      # one in olm-catalog branch
-      git merge -Xours origin/olm-catalog  -m "ci: merge olm-catalog branch"
-
   - name: Build Operator Image
     shell: bash
     run: make operator-image
@@ -76,20 +49,12 @@ runs:
     shell: bash
     run: make bundle-push
 
-
   - name: Build Catalog Image
     shell: bash
-    run: |
-      make catalog-image
+    # update-channels.sh modifies olm/index-template.yaml in place;
+    # the calling workflow is responsible for committing and opening a PR.
+    run: make catalog-image
 
-      # NOTE: add a commit only if the catalog can built sucessfully
-      git add bundle/ olm/
-      git commit -m "ci(bot): update catalog image"
-
-  - name: Publish catalog image
+  - name: Publish Catalog Image
     shell: bash
-    run: |
-      make catalog-push
-
-      # update olm-catalog only if catalog could be successfully published
-      git push origin HEAD:olm-catalog
+    run: make catalog-push

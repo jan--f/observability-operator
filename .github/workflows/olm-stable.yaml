@@ -1,4 +1,7 @@
 ---
+# Triggered when a GitHub pre-release is promoted to a full release.
+# Publishes OLM stable images and opens a PR against the corresponding
+# release-* branch with the updated catalog index.
 name: OLM Stable Channel
 
 on:
@@ -6,16 +9,36 @@ on:
     types:
       - released
 
+permissions:
+  contents: write
+  pull-requests: write
+
 jobs:
   release:
     runs-on: ubuntu-latest
     environment: quay
     steps:
+      - name: Determine release branch
+        id: branch
+        run: |
+          TAG="${{ github.event.release.tag_name }}"
+          # v1.4.2 -> release-1.4
+          BRANCH="release-$(echo "${TAG#v}" | cut -d. -f1,2)"
+          echo "name=$BRANCH" >> "$GITHUB_OUTPUT"
+
       - uses: actions/checkout@v6
         with:
+          ref: ${{ steps.branch.outputs.name }}
           fetch-depth: 0
+          token: ${{ secrets.REPOSITORY_PUSH_TOKEN }}
 
-      - name: publish
+      - name: Setup Go environment
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: 'go.mod'
+          check-latest: true
+
+      - name: Publish catalog
         uses: ./.github/olm-publish
         env:
           IMG_BASE: ${{ vars.IMG_BASE }}
@@ -25,3 +48,27 @@ jobs:
         with:
           quay_login: ${{ secrets.QUAY_LOGIN }}
           quay_token: ${{ secrets.QUAY_TOKEN }}
+
+      - name: Open catalog PR
+        env:
+          GH_TOKEN: ${{ secrets.REPOSITORY_PUSH_TOKEN }}
+        run: |
+          git config user.name rhobs-release-bot
+          git config user.email release-bot@monitoring.rhobs.io
+
+          VERSION="$(cat VERSION)"
+          TARGET_BRANCH="${{ steps.branch.outputs.name }}"
+          PR_BRANCH="ci/olm-catalog-stable-${TARGET_BRANCH}"
+          git checkout -b "$PR_BRANCH"
+          git add bundle/ olm/index-template.yaml
+          git commit -m "ci(bot): update OLM stable catalog to ${VERSION}"
+          git push --force origin "$PR_BRANCH"
+
+          existing=$(gh pr list --head "$PR_BRANCH" --base "$TARGET_BRANCH" --json number --jq '.[0].number')
+          if [ -z "$existing" ]; then
+            gh pr create \
+              --base "$TARGET_BRANCH" \
+              --head "$PR_BRANCH" \
+              --title "ci: update OLM stable catalog (${VERSION})" \
+              --body "Automated catalog update for the stable channel."
+          fi

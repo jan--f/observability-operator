@@ -1,4 +1,5 @@
-# Decide between Pre-Release and Development Release
+# Publishes a development release on every push to main (except release commits).
+# RC and stable releases are handled by release-branch.yaml and olm-stable.yaml.
 name: Release
 on:
   push:
@@ -6,6 +7,7 @@ on:
 
 permissions:
   contents: write
+  pull-requests: write
 
 jobs:
   e2e-tests-olm:
@@ -26,6 +28,7 @@ jobs:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
+          token: ${{ secrets.REPOSITORY_PUSH_TOKEN }}
 
       # Bumping the version in the next step will also run code generation scripts
       # that depend on controller-gen.
@@ -55,119 +58,28 @@ jobs:
           quay_login: ${{ secrets.QUAY_LOGIN }}
           quay_token: ${{ secrets.QUAY_TOKEN }}
 
-      - name: Push catalog index changes
-        uses: ad-m/github-push-action@master
-        with:
-          github_token: ${{ secrets.REPOSITORY_PUSH_TOKEN }}
-          branch: olm-catalog
-
-      - name: Publish Package
-        uses: ./.github/package-operator-publish
+      - name: Open catalog PR
         env:
-          IMG_BASE: ${{ vars.IMG_BASE }}
-          VERSION: ${{ steps.version.outputs.version }}
-        with:
-          quay_login: ${{ secrets.QUAY_LOGIN }}
-          quay_token: ${{ secrets.QUAY_TOKEN }}
-
-      - name: Publish test harness
-        uses: ./.github/osd-test-harness-publish
-        env:
-          IMG_BASE: ${{ vars.IMG_BASE }}
-          VERSION: ${{ steps.version.outputs.version }}
-        with:
-          quay_login: ${{ secrets.QUAY_LOGIN }}
-          quay_token: ${{ secrets.QUAY_TOKEN }}
-
-  create-github-prerelease:
-    needs:
-      - e2e-tests-olm
-    runs-on: ubuntu-latest
-    if: "startsWith(github.event.head_commit.message, 'chore(release):')"
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-          token: ${{ secrets.REPOSITORY_PUSH_TOKEN }}
-          persist-credentials: false
-
-      # Bumping the version in the next step will also run code generation scripts
-      # that depend on controller-gen.
-      # Therefore, we first need to setup Go so that we can install the
-      # controller-gen binary.
-      - name: Setup Go environment
-        uses: actions/setup-go@v6
-        with:
-          go-version-file: 'go.mod'
-          check-latest: true
-
-      - name: Generate release notes
+          GH_TOKEN: ${{ secrets.REPOSITORY_PUSH_TOKEN }}
         run: |
-          # Create the release notes for the Github release
           git config user.name rhobs-release-bot
           git config user.email release-bot@monitoring.rhobs.io
-          npx standard-version -i RELEASE_BODY.md  \
-            --release-as $(cat VERSION) \
-            --skip.commit
 
-      - name: Publish tag
-        id: publish_tag
-        run: |
-          # NOTE tag is created by standard-version and points to the
-          # chore(release): commit
-          git push --follow-tags
-          echo "tag_name=$(git describe HEAD --abbrev=0)" >> $GITHUB_OUTPUT
+          PR_BRANCH="ci/olm-catalog-development"
+          git checkout -b "$PR_BRANCH"
+          git add bundle/ olm/index-template.yaml
+          git commit -m "ci(bot): update OLM development catalog to ${{ steps.version.outputs.version }}"
+          git push --force origin "$PR_BRANCH"
 
-      - name: Create Github release
-        uses: ncipollo/release-action@v1
-        with:
-          tag: ${{ steps.publish_tag.outputs.tag_name }}
-          bodyFile: RELEASE_BODY.md
-          # NOTE: We always generate pre-releases and mark them as releases manually
-          prerelease: true
-
-  publish-olm-candidate:
-    needs:
-      - create-github-prerelease
-    runs-on: ubuntu-latest
-    environment: quay
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-          token: ${{ secrets.REPOSITORY_PUSH_TOKEN }}
-
-      - name: Setup Go environment
-        uses: actions/setup-go@v6
-        with:
-          go-version-file: 'go.mod'
-          check-latest: true
-
-      - name: Set version
-        id: version
-        run: |
-          version="$(cat VERSION)-rc"
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-
-      - name: publish catalog
-        uses: ./.github/olm-publish
-        env:
-          IMG_BASE: ${{ vars.IMG_BASE }}
-          VERSION: ${{ steps.version.outputs.version }}
-          CHANNELS: candidate,development
-          DEFAULT_CHANNEL: candidate
-          RELEASE_SHA: ${GITHUB_SHA}
-        with:
-          quay_login: ${{ secrets.QUAY_LOGIN }}
-          quay_token: ${{ secrets.QUAY_TOKEN }}
-
-      - name: Push catalog index changes
-        uses: ad-m/github-push-action@master
-        with:
-          github_token: ${{ secrets.REPOSITORY_PUSH_TOKEN }}
-          branch: olm-catalog
+          # Create the PR if it does not exist yet; subsequent pushes update it via force-push.
+          existing=$(gh pr list --head "$PR_BRANCH" --base main --json number --jq '.[0].number')
+          if [ -z "$existing" ]; then
+            gh pr create \
+              --base main \
+              --head "$PR_BRANCH" \
+              --title "ci: update OLM development catalog" \
+              --body "Automated catalog update for the development channel. This PR is force-updated on every push to main."
+          fi
 
       - name: Publish Package
         uses: ./.github/package-operator-publish
